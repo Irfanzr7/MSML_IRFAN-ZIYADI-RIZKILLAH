@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import mlflow
 import mlflow.sklearn
+import dagshub
 
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
@@ -14,6 +15,12 @@ logging.basicConfig(level=logging.INFO)
 
 mlflow.set_tracking_uri("file:./mlruns")
 mlflow.set_experiment("Membangun_Model")
+
+dagshub.init(
+    repo_owner="Irfanzr7",
+    repo_name="MSML_IRFAN-ZIYADI-RIZKILLAH",
+    mlflow=True
+)
 
 
 def find_processed_csv():

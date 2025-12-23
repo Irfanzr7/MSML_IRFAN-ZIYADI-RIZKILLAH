@@ -1,13 +1,13 @@
 import os
-import os
 import glob
-import logging
 import json
+import logging
 import joblib
 import numpy as np
 import pandas as pd
 import mlflow
 import mlflow.sklearn
+import dagshub
 
 from sklearn.model_selection import train_test_split, StratifiedKFold, RandomizedSearchCV
 from sklearn.pipeline import Pipeline
@@ -19,14 +19,32 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 from scipy.stats import randint, uniform
 
-logging.basicConfig(level=logging.INFO)
+# -------------------------------------------------------------------
+# LOGGING
+# -------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# -------------------------------------------------------------------
+# DAGSHUB + MLFLOW INIT
+# -------------------------------------------------------------------
+dagshub.init(
+    repo_owner="Irfanzr7",
+    repo_name="MSML_IRFAN-ZIYADI-RIZKILLAH",
+    mlflow=True
+)
 
+if not os.getenv("DAGSHUB_USER_TOKEN"):
+    raise RuntimeError("DAGSHUB_USER_TOKEN belum terbaca. Restart VS Code setelah setx.")
+
+# -------------------------------------------------------------------
+# HELPER FUNCTIONS
+# -------------------------------------------------------------------
 def find_processed_csv():
     candidates = [
         os.path.join("weather_preprocessing", "seattle_weather_processed.csv"),
         "seattle_weather_processed.csv",
     ]
+
     for p in candidates:
         if os.path.exists(p):
             return p
@@ -36,22 +54,18 @@ def find_processed_csv():
         logging.info("Found processed csv: %s", matches[0])
         return matches[0]
 
-    raise FileNotFoundError(
-        "Processed dataset tidak ditemukan. Pastikan file seattle_weather_processed.csv berada di folder proyek atau di folder 'weather_preprocessing'."
-    )
+    raise FileNotFoundError("Dataset hasil preprocessing tidak ditemukan")
 
 
 def build_preprocessor(X):
-    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-    cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+    num_cols = X.select_dtypes(include=[np.number]).columns
+    cat_cols = X.select_dtypes(exclude=[np.number]).columns
 
     num_pipe = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler()),
+        ("scaler", StandardScaler())
     ])
 
-    # OneHotEncoder parameter changed name in scikit-learn >=1.2 (sparse -> sparse_output).
-    # Create encoder in a try/except for compatibility.
     try:
         ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
     except TypeError:
@@ -59,135 +73,117 @@ def build_preprocessor(X):
 
     cat_pipe = Pipeline([
         ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("onehot", ohe),
+        ("onehot", ohe)
     ])
 
-    preprocessor = ColumnTransformer([
+    return ColumnTransformer([
         ("num", num_pipe, num_cols),
-        ("cat", cat_pipe, cat_cols),
-    ], remainder="drop")
-    return preprocessor
+        ("cat", cat_pipe, cat_cols)
+    ])
 
-
-def main(n_iter=50, test_size=0.2, random_state=42):
+# -------------------------------------------------------------------
+# MAIN TRAINING
+# -------------------------------------------------------------------
+def main(n_iter=30, test_size=0.2, random_state=42):
     data_path = find_processed_csv()
     df = pd.read_csv(data_path)
 
     if "weather" not in df.columns:
-        raise ValueError("Kolom target 'weather' tidak ditemukan.")
+        raise ValueError("Kolom target 'weather' tidak ditemukan")
 
-    X = df.drop(columns=["weather"]).copy()
-    y = df["weather"].copy()
-
-    preprocessor = build_preprocessor(X)
-
-    pipelines = {
-        "logreg": Pipeline([
-            ("pre", preprocessor),
-            ("logreg", LogisticRegression(max_iter=2000, random_state=random_state)),
-        ]),
-        "rf": Pipeline([
-            ("pre", preprocessor),
-            ("rf", RandomForestClassifier(random_state=random_state)),
-        ]),
-    }
+    X = df.drop(columns=["weather"])
+    y = df["weather"]
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, stratify=y, random_state=random_state
     )
 
+    preprocessor = build_preprocessor(X)
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
 
-    # Enable MLflow autologging for sklearn
-    mlflow.sklearn.autolog()
+    models = {
+        "logreg": (
+            Pipeline([
+                ("prep", preprocessor),
+                ("model", LogisticRegression(max_iter=2000))
+            ]),
+            {
+                "model__C": uniform(0.01, 10),
+                "model__solver": ["lbfgs", "saga"],
+                "model__penalty": ["l2"]
+            }
+        ),
+        "rf": (
+            Pipeline([
+                ("prep", preprocessor),
+                ("model", RandomForestClassifier(random_state=random_state))
+            ]),
+            {
+                "model__n_estimators": randint(100, 400),
+                "model__max_depth": randint(3, 30),
+                "model__min_samples_split": randint(2, 10)
+            }
+        )
+    }
 
-    best_overall = None
-    best_score = -float("inf")
+    best_model = None
+    best_f1 = -1
 
     with mlflow.start_run(run_name="model_tuning"):
-        for name, pipe in pipelines.items():
-            if name == "logreg":
-                param_dist = {
-                    "logreg__C": uniform(0.01, 10.0),
-                    "logreg__solver": ["lbfgs", "saga"],
-                    "logreg__penalty": ["l2"],
-                }
-            else:
-                param_dist = {
-                    "rf__n_estimators": randint(50, 400),
-                    "rf__max_depth": randint(3, 30),
-                    "rf__min_samples_split": randint(2, 10),
-                }
+        mlflow.log_param("n_iter", n_iter)
+        mlflow.log_param("test_size", test_size)
 
-            rnd = RandomizedSearchCV(
+        for name, (pipe, params) in models.items():
+            logging.info("Tuning model: %s", name)
+
+            search = RandomizedSearchCV(
                 pipe,
-                param_distributions=param_dist,
+                params,
                 n_iter=n_iter,
                 scoring="f1_weighted",
                 cv=cv,
-                random_state=random_state,
                 n_jobs=-1,
-                verbose=1,
+                random_state=random_state,
+                verbose=1
             )
 
-            logging.info("Tuning %s with %s iterations", name, n_iter)
-            rnd.fit(X_train, y_train)
+            search.fit(X_train, y_train)
 
-            try:
-                mlflow.log_param(f"{name}_best_params", json.dumps(rnd.best_params_))
-            except Exception:
-                mlflow.log_param(f"{name}_best_params", str(rnd.best_params_))
-
-            mlflow.log_metric(f"{name}_best_cv_score", float(rnd.best_score_))
-
-            y_pred = rnd.predict(X_test)
+            y_pred = search.predict(X_test)
             acc = accuracy_score(y_test, y_pred)
             f1 = f1_score(y_test, y_pred, average="weighted")
-            mlflow.log_metric(f"{name}_test_accuracy", float(acc))
-            mlflow.log_metric(f"{name}_test_f1_weighted", float(f1))
 
-            report = classification_report(y_test, y_pred)
+            # ------------------ LOG METRICS ------------------
+            mlflow.log_metric(f"{name}_accuracy", acc)
+            mlflow.log_metric(f"{name}_f1_weighted", f1)
+
+            # ------------------ LOG PARAMS ------------------
+            mlflow.log_param(f"{name}_best_params", json.dumps(search.best_params_))
+
+            # ------------------ LOG ARTIFACTS ------------------
             os.makedirs("artifacts", exist_ok=True)
-            report_path = os.path.join("artifacts", f"classification_report_{name}.txt")
-            with open(report_path, "w", encoding="utf-8") as f:
-                f.write(report)
+
+            report_path = f"artifacts/classification_report_{name}.txt"
+            with open(report_path, "w") as f:
+                f.write(classification_report(y_test, y_pred))
             mlflow.log_artifact(report_path)
 
-            try:
-                mlflow.sklearn.log_model(rnd.best_estimator_, artifact_path=f"model_{name}")
-            except Exception:
-                logging.exception("Gagal log_model ke MLflow untuk %s", name)
+            model_path = f"artifacts/model_{name}.joblib"
+            joblib.dump(search.best_estimator_, model_path)
+            mlflow.log_artifact(model_path)
 
-            model_joblib_path = os.path.join("artifacts", f"model_{name}.joblib")
-            joblib.dump(rnd.best_estimator_, model_joblib_path)
-            mlflow.log_artifact(model_joblib_path)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_model = (name, search.best_estimator_)
 
-            if f1 > best_score:
-                best_score = f1
-                best_overall = (name, rnd.best_estimator_, f1, acc, rnd.best_params_)
-
-        if best_overall:
-            name, estimator, best_f1, best_acc, best_params = best_overall
+        # ------------------ LOG BEST MODEL ------------------
+        if best_model:
+            name, model = best_model
             mlflow.log_param("best_model", name)
-            mlflow.log_metric("best_model_test_f1_weighted", float(best_f1))
-            mlflow.log_metric("best_model_test_accuracy", float(best_acc))
-            try:
-                mlflow.log_param("best_model_params", json.dumps(best_params))
-            except Exception:
-                mlflow.log_param("best_model_params", str(best_params))
+            mlflow.sklearn.log_model(model, artifact_path="best_model")
 
-            os.makedirs("artifacts", exist_ok=True)
-            best_model_path = os.path.join("artifacts", "best_model.joblib")
-            joblib.dump(estimator, best_model_path)
-            mlflow.log_artifact(best_model_path)
-            try:
-                mlflow.sklearn.log_model(estimator, artifact_path="best_model")
-            except Exception:
-                logging.exception("Gagal log_model best_model ke MLflow")
+    print("Training & tuning selesai. Best model:", best_model[0])
 
-        print("Tuning selesai. Best model:", best_overall[0] if best_overall else None)
-
-
+# -------------------------------------------------------------------
 if __name__ == "__main__":
     main()
-
