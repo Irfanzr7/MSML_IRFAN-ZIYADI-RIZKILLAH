@@ -1,0 +1,22 @@
+artifact_path: file:D:/BACKUP DATA/Dicoding/SMSML_Irfan Ziyadi Rizkillah/Membangun_Model/mlruns/0/models/m-4436d209cd244932ba5539eb84f72b2f/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.14.0
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.8.0
+mlflow_version: 3.8.0
+model_id: m-4436d209cd244932ba5539eb84f72b2f
+model_size_bytes: 2819
+model_uuid: m-4436d209cd244932ba5539eb84f72b2f
+prompts: null
+run_id: 419afe6a6b9a43ffa8cc57f68ea673b4
+utc_time_created: '2025-12-23 17:43:25.398310'
