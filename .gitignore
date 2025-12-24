@@ -1,0 +1,14 @@
+# MLflow local outputs
+Membangun_Model/mlruns/
+Membangun_Model/mlflow.db
+Membangun_Model/artifacts/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
